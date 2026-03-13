@@ -23,26 +23,84 @@ PubSubClient mqttClient(espClient);
 
 void setup_wifi()
 {
+    const unsigned long TIMEOUT_MS = 20000;
+    const unsigned long RECONNECT_MS = 10000;
+    const unsigned long DOT_MS = 500;
+
     Serial.println();
     Serial.print("Connecting to ");
     Serial.println(WIFI_SSID);
 
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    unsigned long start = millis();
+    unsigned long lastDot = start;
+    bool nudged = false;
+
     while (WiFi.status() != WL_CONNECTED)
     {
-        delay(500);
-        Serial.print(".");
+        unsigned long elapsed = millis() - start;
+
+        if (elapsed >= TIMEOUT_MS)
+            break;
+
+        // Mid-point reconnect nudge (~10 s in)
+        if (!nudged && elapsed >= RECONNECT_MS)
+        {
+            WiFi.reconnect();
+            nudged = true;
+        }
+
+        // Print a dot every 500 ms
+        if (millis() - lastDot >= DOT_MS)
+        {
+            Serial.print(".");
+            lastDot = millis();
+        }
     }
+
     Serial.println();
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        int s = WiFi.status();
+        Serial.print("WiFi failed, status=");
+        Serial.print(s);
+        Serial.print(" (");
+        switch (s)
+        {
+        case WL_NO_SSID_AVAIL:
+            Serial.print("SSID not found");
+            break;
+        case WL_CONNECT_FAILED:
+            Serial.print("wrong password");
+            break;
+        case WL_DISCONNECTED:
+            Serial.print("disconnected/auth");
+            break;
+        case WL_IDLE_STATUS:
+            Serial.print("idle — timed out");
+            break;
+        default:
+            Serial.print("unknown");
+            break;
+        }
+        Serial.println(") — rebooting...");
+        unsigned long wait = millis();
+        while (millis() - wait < 3000)
+        {
+        } // brief pause so Serial can flush
+        ESP.restart();
+    }
+
     Serial.println("WiFi connected");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
 }
 
-bool publishVital(const char *type, float value, const char *unit)
+bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd)
 {
-    char topic[80];
-    snprintf(topic, sizeof(topic), "vitals/%s/%s", PATIENT_ID, type);
+    char topic[64];
+    snprintf(topic, sizeof(topic), "vitals/%s", PATIENT_ID);
 
 #if ARDUINOJSON_VERSION_MAJOR >= 7
     JsonDocument doc;
@@ -50,10 +108,11 @@ bool publishVital(const char *type, float value, const char *unit)
     StaticJsonDocument<256> doc;
 #endif
     doc["patientId"] = PATIENT_ID;
-    doc["type"] = type;
-    doc["value"] = value;
-    doc["unit"] = unit;
     doc["deviceId"] = DEVICE_ID;
+    doc["hr"] = hr;
+    doc["temp"] = temp;
+    doc["hrv_sdnn"] = hrv_sdnn;
+    doc["hrv_rmssd"] = hrv_rmssd;
 
     char buf[256];
     serializeJson(doc, buf);
@@ -76,14 +135,42 @@ boolean reconnect()
     return mqttClient.connected();
 }
 
-// ---------------- Heart rate ----------------
+// ---------------- Heart rate + HRV ----------------
 const byte RATE_SIZE = 8;
 byte rates[RATE_SIZE];
+float rrIntervals[RATE_SIZE]; // R-R intervals in ms
 byte rateSpot = 0;
 byte rateCount = 0;
 long lastBeat = 0;
 float beatsPerMinute = 0;
 int beatAvg = 0;
+
+float computeSDNN(float *rr, byte count)
+{
+    if (count < 2)
+        return 0.0f;
+    float mean = 0;
+    for (byte i = 0; i < count; i++)
+        mean += rr[i];
+    mean /= count;
+    float variance = 0;
+    for (byte i = 0; i < count; i++)
+        variance += (rr[i] - mean) * (rr[i] - mean);
+    return sqrt(variance / count);
+}
+
+float computeRMSSD(float *rr, byte count)
+{
+    if (count < 2)
+        return 0.0f;
+    float sumSq = 0;
+    for (byte i = 1; i < count; i++)
+    {
+        float diff = rr[i] - rr[i - 1];
+        sumSq += diff * diff;
+    }
+    return sqrt(sumSq / (count - 1));
+}
 
 // ---------------- Serial printing ----------------
 unsigned long lastPrintTime = 0;
@@ -131,6 +218,7 @@ void loop()
         beatAvg = 0;
         beatsPerMinute = 0;
         memset(rates, 0, sizeof(rates));
+        memset(rrIntervals, 0, sizeof(rrIntervals));
     }
     else if (checkForBeat(irValue))
     {
@@ -143,8 +231,9 @@ void loop()
 
             if (beatsPerMinute > 45 && beatsPerMinute < 180)
             {
-                rates[rateSpot++] = (byte)beatsPerMinute;
-                rateSpot %= RATE_SIZE;
+                rates[rateSpot] = (byte)beatsPerMinute;
+                rrIntervals[rateSpot] = (float)delta; // store R-R interval (ms)
+                rateSpot = (rateSpot + 1) % RATE_SIZE;
                 if (rateCount < RATE_SIZE)
                     rateCount++;
 
@@ -181,7 +270,11 @@ void loop()
         float tempC = thermistor.read();
         float heartRate = beatAvg > 0 ? (float)beatAvg : beatsPerMinute;
 
-        Serial.printf("IR=%-7ld | BPM=%-6.1f | Avg BPM=%-4d | Temp=%.2f°C", irValue, beatsPerMinute, beatAvg, tempC);
+        float sdnn = computeSDNN(rrIntervals, rateCount);
+        float rmssd = computeRMSSD(rrIntervals, rateCount);
+
+        Serial.printf("IR=%-7ld | BPM=%-6.1f | Avg BPM=%-4d | Temp=%.2f°C | SDNN=%.1f | RMSSD=%.1f",
+                      irValue, beatsPerMinute, beatAvg, tempC, sdnn, rmssd);
         if (irValue < 50000)
             Serial.print(" | No finger detected");
         Serial.println();
@@ -193,8 +286,7 @@ void loop()
         }
         else
         {
-            publishVital("HEART_RATE", heartRate, "bpm");
-            publishVital("TEMPERATURE", tempC, "C");
+            publishReading(heartRate, tempC, sdnn, rmssd);
         }
 
         Serial.println("---");
