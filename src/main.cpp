@@ -6,22 +6,8 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-
+#include "secrets.h"
 #define THERMISTOR_PIN 32
-
-// WiFi credentials
-const char *WIFI_SSID = "Blay";
-const char *WIFI_PASSWORD = "blay123456";
-
-// MQTT broker settings
-const char *MQTT_BROKER_IP = "35048523647747189040301dcfbe034d.s1.eu.hivemq.cloud";
-const int MQTT_BROKER_PORT = 8883;
-const char *MQTT_CLIENT_ID = "esp32-sensor-node-01";
-const char *MQTT_USER = "ama_annor";
-const char *MQTT_PASSWORD = "Amaannorrocks12";
-
-const char *DEVICE_ID = "esp32-sensor-node-01";
-const char *PATIENT_ID = "1DPtrQMXGl1vjmHz6rqW";
 
 // Publishing interval
 const unsigned long PUBLISH_INTERVAL_MS = 1000;
