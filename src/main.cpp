@@ -6,12 +6,16 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include "esp_task_wdt.h"
 #include "secrets.h"
 #define THERMISTOR_PIN 32
 
-// Publishing interval
-const unsigned long PUBLISH_INTERVAL_MS = 1000;
+// Active collection window before sleeping
+const unsigned long PUBLISH_INTERVAL_MS = 15000; // 15 s — gives checkForBeat() time to re-stabilise after sleep gap
 unsigned long lastPublishTime = 0;
+
+// Light sleep duration — 10 s for testing, change to (300ULL * 1000000ULL) for production
+#define SLEEP_DURATION_US (10ULL * 1000000ULL)
 
 // ---------------- Sensors ----------------
 MAX30105 particleSensor;
@@ -44,14 +48,12 @@ void setup_wifi()
         if (elapsed >= TIMEOUT_MS)
             break;
 
-        // Mid-point reconnect nudge (~10 s in)
         if (!nudged && elapsed >= RECONNECT_MS)
         {
             WiFi.reconnect();
             nudged = true;
         }
 
-        // Print a dot every 500 ms
         if (millis() - lastDot >= DOT_MS)
         {
             Serial.print(".");
@@ -88,7 +90,7 @@ void setup_wifi()
         unsigned long wait = millis();
         while (millis() - wait < 3000)
         {
-        } // brief pause so Serial can flush
+        }
         ESP.restart();
     }
 
@@ -97,7 +99,7 @@ void setup_wifi()
     Serial.println(WiFi.localIP());
 }
 
-bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd)
+bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd, byte beatCount)
 {
     char topic[64];
     snprintf(topic, sizeof(topic), "vitals/%s", PATIENT_ID);
@@ -113,6 +115,8 @@ bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd)
     doc["temp"] = temp;
     doc["hrv_sdnn"] = hrv_sdnn;
     doc["hrv_rmssd"] = hrv_rmssd;
+    doc["beat_count"] = beatCount;
+    doc["esp_millis"] = millis(); // debug: device-side publish timestamp
 
     char buf[256];
     serializeJson(doc, buf);
@@ -123,10 +127,11 @@ bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd)
 
 boolean reconnect()
 {
+    // Yield to FreeRTOS before blocking on TLS handshake — allows IDLE0 to run
+    // and reset its watchdog subscription before we occupy CPU 0.
+    delay(1);
     if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD))
-    {
         Serial.println("MQTT connected");
-    }
     else
     {
         Serial.print("MQTT failed, state=");
@@ -135,15 +140,40 @@ boolean reconnect()
     return mqttClient.connected();
 }
 
+// ---------------- Simulated temperature ----------------
+// Thermistor returns NaN; simulate physiologically plausible peripheral
+// (finger) temperatures, including diabetic patterns (poor circulation /
+// peripheral neuropathy → lower temp, higher variance).
+float simulateTemperature()
+{
+    bool diabeticPattern = (esp_random() % 10) < 3; // ~30% diabetic-like
+
+    float base, range;
+    if (diabeticPattern)
+    {
+        base = 29.5f; // lower peripheral temp due to poor circulation
+        range = 5.0f; // ±2.5°C — more variable
+    }
+    else
+    {
+        base = 33.5f; // normal finger surface temperature
+        range = 3.0f; // ±1.5°C
+    }
+
+    float noise = ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * range;
+    return base + noise;
+}
+
 // ---------------- Heart rate + HRV ----------------
 const byte RATE_SIZE = 8;
 byte rates[RATE_SIZE];
-float rrIntervals[RATE_SIZE]; // R-R intervals in ms
+float rrIntervals[RATE_SIZE];
 byte rateSpot = 0;
 byte rateCount = 0;
 long lastBeat = 0;
 float beatsPerMinute = 0;
 int beatAvg = 0;
+byte newBeatsThisCycle = 0; // valid beats collected since last publish
 
 float computeSDNN(float *rr, byte count)
 {
@@ -172,17 +202,17 @@ float computeRMSSD(float *rr, byte count)
     return sqrt(sumSq / (count - 1));
 }
 
-// ---------------- Serial printing ----------------
-unsigned long lastPrintTime = 0;
-const unsigned long PRINT_INTERVAL = 3000; // every 3s
-
 void setup()
 {
     Serial.begin(115200);
 
+    // Extend task watchdog timeout to 30 s — the default 5 s is shorter than
+    // the worst-case TLS handshake duration, causing spurious IDLE0 watchdog
+    // crashes when mqttClient.connect() blocks CPU 0 during reconnect.
+    esp_task_wdt_init(30, true);
+
     setup_wifi();
 
-    // Use insecure TLS for HiveMQ Cloud
     espClient.setInsecure();
     mqttClient.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT);
     mqttClient.setBufferSize(512);
@@ -210,7 +240,16 @@ void loop()
 {
     long irValue = particleSensor.getIR();
 
-    // Heart rate logic (unchanged from your improved version)
+    // Diagnostic: print raw IR every 500ms so we can see pulsatile variation.
+    // If IR is flat between [BEAT] events, checkForBeat() has no AC signal to work with.
+    // If IR oscillates by thousands of counts, the algorithm should be detecting beats.
+    static unsigned long lastIRDiag = 0;
+    if (millis() - lastIRDiag >= 500)
+    {
+        Serial.printf("[IR] %ld\n", irValue);
+        lastIRDiag = millis();
+    }
+
     if (irValue < 50000)
     {
         rateSpot = 0;
@@ -228,14 +267,16 @@ void loop()
         if (delta > 0)
         {
             beatsPerMinute = 60.0 / (delta / 1000.0);
+            Serial.printf("[BEAT] delta=%ldms raw=%.1f\n", delta, beatsPerMinute);
 
-            if (beatsPerMinute > 45 && beatsPerMinute < 180)
+            if (beatsPerMinute > 45 && beatsPerMinute < 150)
             {
                 rates[rateSpot] = (byte)beatsPerMinute;
-                rrIntervals[rateSpot] = (float)delta; // store R-R interval (ms)
+                rrIntervals[rateSpot] = (float)delta;
                 rateSpot = (rateSpot + 1) % RATE_SIZE;
                 if (rateCount < RATE_SIZE)
                     rateCount++;
+                newBeatsThisCycle++;
 
                 beatAvg = 0;
                 for (byte i = 0; i < rateCount; i++)
@@ -245,7 +286,7 @@ void loop()
         }
     }
 
-    // MQTT Reconnection
+    // MQTT keepalive / reconnect fallback
     if (WiFi.status() == WL_CONNECTED && !mqttClient.connected())
     {
         static unsigned long lastReconnectAttempt = 0;
@@ -253,8 +294,7 @@ void loop()
         if (now - lastReconnectAttempt > 5000)
         {
             lastReconnectAttempt = now;
-            if (reconnect())
-                lastReconnectAttempt = 0;
+            reconnect();
         }
     }
     else if (mqttClient.connected())
@@ -262,14 +302,11 @@ void loop()
         mqttClient.loop();
     }
 
-    // Publish vitals
+    // Publish vitals then light sleep
     if (millis() - lastPublishTime >= PUBLISH_INTERVAL_MS)
     {
-        lastPublishTime = millis();
-
-        float tempC = thermistor.read();
+        float tempC = simulateTemperature();
         float heartRate = beatAvg > 0 ? (float)beatAvg : beatsPerMinute;
-
         float sdnn = computeSDNN(rrIntervals, rateCount);
         float rmssd = computeRMSSD(rrIntervals, rateCount);
 
@@ -286,23 +323,44 @@ void loop()
         }
         else
         {
-            publishReading(heartRate, tempC, sdnn, rmssd);
+            publishReading(heartRate, tempC, sdnn, rmssd, newBeatsThisCycle);
         }
 
         Serial.println("---");
-    }
+        Serial.println("Entering light sleep for 10 seconds...");
+        Serial.flush();
 
-    if (millis() - lastPrintTime >= PRINT_INTERVAL)
-    {
-        lastPrintTime = millis();
-        Serial.print("IR=");
-        Serial.print(irValue);
-        Serial.print(" | BPM=");
-        Serial.print(beatsPerMinute);
-        Serial.print(" | Avg BPM=");
-        Serial.print(beatAvg);
-        Serial.print(" | Temp=");
-        Serial.print(thermistor.read());
-        Serial.println("°C");
+        mqttClient.disconnect(); // close TLS session cleanly before sleep
+        espClient.stop();        // release the TCP socket
+
+        esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
+        esp_light_sleep_start();
+
+        // Execution resumes here after wake.
+        // millis() continues during light sleep, so lastBeat is stale —
+        // the first inter-beat interval after wake would include the full
+        // sleep duration, producing an implausibly low BPM. Reset it so
+        // the existing BPM filter seeds it cleanly on the next beat.
+        delay(500); // let UART and WiFi stack fully settle after wake
+        Serial.println("Woke from light sleep.");
+
+        // Wait for WiFi to be ready before attempting TLS — rushing it causes errno 113
+        unsigned long wifiWait = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - wifiWait < 3000)
+            delay(50);
+
+        lastBeat = 0;
+        newBeatsThisCycle = 0;
+
+        // Force immediate MQTT reconnect — static lastReconnectAttempt persists
+        // across light sleep and would otherwise block attempts for up to 5 seconds
+        reconnect();
+
+        // Clear FIFO *after* reconnect — reconnect() blocks for several seconds
+        // during TLS handshake, during which the sensor keeps running and overflows
+        // the 32-sample FIFO again. Clearing after reconnect gives checkForBeat()
+        // fresh samples from the moment the collection window starts.
+        particleSensor.clearFIFO();
+        lastPublishTime = millis(); // start window after reconnect + FIFO clear
     }
 }
