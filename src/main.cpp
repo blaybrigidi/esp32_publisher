@@ -173,36 +173,6 @@ boolean reconnect()
     return mqttClient.connected();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Generate a simulated finger temperature reading.
-//
-// The physical thermistor is currently returning invalid data, so we produce
-// a realistic random value instead.  We model two populations:
-//   • Normal circulation  — finger ~33.5 °C, small variation
-//   • Diabetic pattern    — finger ~29.5 °C, larger variation
-//     (poor circulation / nerve damage causes cooler, less stable peripherals)
-// About 30 % of readings use the diabetic pattern to make test data varied.
-// ─────────────────────────────────────────────────────────────────────────────
-float simulateTemperature()
-{
-    bool diabeticPattern = (esp_random() % 10) < 3; // true ~30 % of the time
-
-    float base, range;
-    if (diabeticPattern)
-    {
-        base  = 29.5f; // cooler fingers due to reduced blood flow
-        range = 5.0f;  // ±2.5 °C swing
-    }
-    else
-    {
-        base  = 33.5f; // typical healthy finger surface temperature
-        range = 3.0f;  // ±1.5 °C swing
-    }
-
-    // Add a random offset within the chosen range
-    float noise = ((float)(esp_random() % 1000) / 1000.0f - 0.5f) * range;
-    return base + noise;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Heart-rate & heart-rate variability (HRV) state
@@ -394,7 +364,7 @@ void loop()
     if (millis() - lastPublishTime >= PUBLISH_INTERVAL_MS)
     {
         // Gather all values for this upload window
-        float tempC     = simulateTemperature();
+        float tempC     = thermistor.readTemperatureC();
         float heartRate = beatAvg > 0 ? (float)beatAvg : beatsPerMinute;
         float sdnn      = computeSDNN(rrIntervals, rateCount);
         float rmssd     = computeRMSSD(rrIntervals, rateCount);

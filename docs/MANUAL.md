@@ -11,12 +11,11 @@ This manual covers everything you need to operate, configure, and understand the
 3. [The Measurement Cycle](#the-measurement-cycle)
 4. [Reading the Serial Output](#reading-the-serial-output)
 5. [Understanding Heart-Rate Variability](#understanding-heart-rate-variability)
-6. [Temperature Simulation Note](#temperature-simulation-note)
-7. [Power and Sleep Behaviour](#power-and-sleep-behaviour)
-8. [MQTT & Dashboard Integration](#mqtt--dashboard-integration)
-9. [Configuration Reference](#configuration-reference)
-10. [Known Limitations](#known-limitations)
-11. [Maintenance](#maintenance)
+6. [Power and Sleep Behaviour](#power-and-sleep-behaviour)
+7. [MQTT & Dashboard Integration](#mqtt--dashboard-integration)
+8. [Configuration Reference](#configuration-reference)
+9. [Known Limitations](#known-limitations)
+10. [Maintenance](#maintenance)
 
 ---
 
@@ -95,8 +94,6 @@ GND
 ```
 
 As temperature rises the thermistor's resistance drops, which raises the voltage at GPIO 32.  The library converts that voltage into a temperature reading automatically.
-
-> **Note:** The thermistor is currently returning invalid data (NaN) in testing.  The firmware falls back to a realistic simulated value — see [Temperature Simulation Note](#temperature-simulation-note).
 
 ---
 
@@ -228,32 +225,6 @@ A higher RMSSD indicates strong parasympathetic (rest-and-digest) activity, whic
 
 ---
 
-## Temperature Simulation Note
-
-The physical thermistor connected to GPIO 32 is currently returning `NaN` (not a number) during testing — likely a wiring or calibration issue.  Rather than send invalid data, the firmware generates a realistic simulated value.
-
-The simulation models two populations:
-
-**Normal peripheral circulation (70% of readings)**
-- Base temperature: ~33.5 °C
-- Variation: ±1.5 °C
-- This reflects a typical healthy fingertip at rest
-
-**Diabetic peripheral pattern (30% of readings)**
-- Base temperature: ~29.5 °C
-- Variation: ±2.5 °C
-- Diabetic patients often have cooler and more variable fingertip temperatures due to reduced blood flow and nerve damage in the extremities
-
-The 30/70 split is arbitrary and exists to make test data varied enough to validate dashboard behaviour.
-
-**To restore real temperature readings**, fix the thermistor wiring and replace the `simulateTemperature()` call in the upload block with:
-
-```cpp
-float tempC = thermistor.readTemperatureC();
-```
-
----
-
 ## Power and Sleep Behaviour
 
 ### Light sleep vs deep sleep
@@ -378,9 +349,6 @@ Each device is configured for one patient.  To monitor multiple patients, flash 
 
 **No local storage**
 If the WiFi or broker is unavailable at upload time, that reading is lost.  The device does not queue readings locally.
-
-**Temperature is simulated**
-The real thermistor is not yet producing valid readings.  All `temp` values in the current firmware are generated, not measured.
 
 **2.4 GHz WiFi only**
 The ESP32 does not support 5 GHz networks.
