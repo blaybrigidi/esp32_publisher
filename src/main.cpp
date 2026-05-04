@@ -9,7 +9,7 @@
 #include <Wire.h>
 #include "MAX30105.h"       // Driver for the heart-rate / blood-oxygen sensor
 #include "heartRate.h"      // Beat-detection algorithm for the sensor above
-#include <ESP32_Thermistor.h>
+#include <ESP32_Thermistor.h>  // Reads finger temperature from the thermistor on GPIO 32
 #include <WiFi.h>
 #include <WiFiClientSecure.h>  // Lets us open an encrypted (HTTPS-style) connection
 #include <PubSubClient.h>      // MQTT library — sends small messages to a broker
@@ -393,7 +393,7 @@ void loop()
         // Light sleep keeps WiFi alive internally, so reconnecting after wake is
         // much faster than a full reboot.
         Serial.println("---");
-        Serial.println("Entering light sleep for 10 seconds...");
+        Serial.printf("Entering light sleep for %llu seconds...\n", SLEEP_DURATION_US / 1000000ULL);
         Serial.flush(); // Make sure all console output is sent before sleeping
 
         mqttClient.disconnect(); // Politely close the MQTT session
