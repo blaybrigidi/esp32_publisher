@@ -282,7 +282,7 @@ Each message is a JSON object:
 ```json
 {
   "patientId":  "patient_001",
-  "deviceId":   "esp32-sensor-node-01",
+  "deviceId":   "your-device-id",
   "hr":         73.5,
   "temp":       33.21,
   "hrv_sdnn":   18.3,

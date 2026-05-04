@@ -106,9 +106,9 @@ Then open `src/secrets.h` and fill in each line:
 #define MQTT_BROKER_PORT 8883                          // always 8883 for TLS
 #define MQTT_USER        "your-mqtt-username"
 #define MQTT_PASSWORD    "your-mqtt-password"
-#define MQTT_CLIENT_ID   "esp32-sensor-node-01"       // must be unique per device
+#define MQTT_CLIENT_ID   "your-device-id"       // must be unique per device
 
-#define DEVICE_ID        "esp32-sensor-node-01"
+#define DEVICE_ID        "your-device-id"
 #define PATIENT_ID       "your-patient-id"            // used as part of the MQTT topic
 ```
 
