@@ -2,7 +2,7 @@
 
 DialOG is a small wearable device that continuously measures a patient's heart rate and finger temperature, then sends those readings to a cloud dashboard over WiFi. It is designed with diabetic patients in mind, where early detection of changes in heart rhythm and peripheral temperature can indicate complications before they become serious.
 
-The device is built around an ESP32 microcontroller paired with the MAX30102 optical heart-rate sensor. It collects data for 15 seconds, uploads a summary, sleeps briefly to save battery, then repeats — all without losing its WiFi connection.
+The device is built around an ESP32 microcontroller paired with the MAX30102 optical heart-rate sensor. It collects data for 15 seconds, uploads a summary, sleeps for 5 minutes to save battery, then repeats — all without losing its WiFi connection.
 
 ---
 
@@ -168,7 +168,7 @@ Once your finger is on the sensor:
 [IR] 91204
 IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | SDNN=18.3 | RMSSD=12.1
 [MQTT] Publish OK
-Entering light sleep for 10 seconds...
+Entering light sleep for 300 seconds...
 Woke from light sleep.
 DNS resolved: 18.185.42.10
 MQTT connected
@@ -204,9 +204,9 @@ These two values at the top of `src/main.cpp` are the most likely things you wil
 const unsigned long PUBLISH_INTERVAL_MS = 15000;  // 15 seconds
 
 // How long the device sleeps between uploads (in microseconds)
-#define SLEEP_DURATION_US (10ULL * 1000000ULL)    // 10 seconds (testing)
-// For production use 5 minutes:
-// #define SLEEP_DURATION_US (300ULL * 1000000ULL)
+#define SLEEP_DURATION_US (300ULL * 1000000ULL)   // 5 minutes
+// For bench testing only, e.g. 10 seconds — don't commit it:
+// #define SLEEP_DURATION_US (10ULL * 1000000ULL)
 ```
 
 A shorter collection window means more frequent uploads but less data per reading.  A longer sleep saves more battery.

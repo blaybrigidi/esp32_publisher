@@ -29,10 +29,10 @@
 const unsigned long PUBLISH_INTERVAL_MS = 15000;
 unsigned long lastPublishTime = 0;
 
-// How long the device sleeps between uploads (in microseconds).
-// 10 seconds here is a short test value — change to (300ULL * 1000000ULL)
-// for a 5-minute sleep in production.
-#define SLEEP_DURATION_US (10ULL * 1000000ULL)
+// How long the device sleeps between uploads (in microseconds): 5 minutes.
+// For bench testing you can temporarily shorten this, e.g. (10ULL * 1000000ULL),
+// but don't commit a short value — the reported duty cycle assumes 5 minutes.
+#define SLEEP_DURATION_US (300ULL * 1000000ULL)
 
 // ── Hardware objects ───────────────────────────────────────────────────────────
 
@@ -413,6 +413,19 @@ void loop()
         while ((WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0, 0, 0, 0))
                && millis() - wifiWait < 5000)
             delay(50);
+
+        // A 5-minute sleep can outlast the access point's idle timeout, in which
+        // case the AP has dropped us.  Ask the radio to re-associate and wait a
+        // little longer before giving up on this upload.
+        if (WiFi.status() != WL_CONNECTED)
+        {
+            Serial.println("[WiFi] Not connected after wake — reconnecting");
+            WiFi.reconnect();
+            wifiWait = millis();
+            while ((WiFi.status() != WL_CONNECTED || WiFi.localIP() == IPAddress(0, 0, 0, 0))
+                   && millis() - wifiWait < 10000)
+                delay(100);
+        }
 
         // The DNS resolver (which turns the broker hostname into an IP address)
         // needs a little extra time after the network comes back up.

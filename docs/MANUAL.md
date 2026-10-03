@@ -50,7 +50,7 @@ Connect to MQTT broker
                    │
                    ▼
 ┌─────────────────────────────────────┐
-│  SLEEP  (default: 10 seconds)       │
+│  SLEEP  (default: 5 minutes)        │
 │  • WiFi stays active internally     │
 │  • CPU pauses — saves battery       │
 │  • Wakes automatically via timer    │
@@ -126,7 +126,7 @@ The readings are packaged as a JSON object and published to the MQTT broker.  Th
 
 ### Step 5 — Sleep
 
-The device closes the MQTT session cleanly, enters light sleep for the configured duration, then wakes and reconnects before starting the next collection window.
+The device closes the MQTT session cleanly, enters light sleep for the configured duration (5 minutes), then wakes and reconnects before starting the next collection window.  If the access point dropped the connection during the sleep, the device asks WiFi to re-associate and waits up to 10 more seconds before giving up on that upload.
 
 After waking, the sensor's internal sample buffer (which fills up during the sleep and reconnect period) is cleared so the beat-detection algorithm always starts fresh.
 
@@ -160,7 +160,7 @@ MQTT connected
 IR=89231  | BPM=73.1  | Avg BPM=73  | Temp=33.54°C | SDNN=16.2 | RMSSD=11.4
 [MQTT] Publish OK
 ---
-Entering light sleep for 10 seconds...
+Entering light sleep for 300 seconds...
 Woke from light sleep.
 DNS resolved: 18.185.42.10
 [MQTT] Connect attempt 1/3
@@ -319,7 +319,7 @@ All tuneable values are near the top of `src/main.cpp`:
 | Setting | Default | Description |
 |---|---|---|
 | `PUBLISH_INTERVAL_MS` | `15000` | Collection window length in milliseconds |
-| `SLEEP_DURATION_US` | `10 000 000` | Sleep duration in microseconds (10 seconds) |
+| `SLEEP_DURATION_US` | `300 000 000` | Sleep duration in microseconds (5 minutes) |
 | `RATE_SIZE` | `8` | Number of beats kept in the rolling buffer |
 | `THERMISTOR_PIN` | `32` | GPIO pin for the temperature sensor |
 
