@@ -166,7 +166,7 @@ Once your finger is on the sensor:
 [IR] 87432
 [BEAT] delta=812ms raw=73.9
 [IR] 91204
-IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | SDNN=18.3 | RMSSD=12.1
+IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | SDNN=18.3 | RMSSD=12.1 | NN=71/73
 [MQTT] Publish OK
 Entering light sleep for 300 seconds...
 Woke from light sleep.
@@ -184,8 +184,8 @@ Each reading sent to the cloud contains the following fields:
 |---|---|
 | `hr` | Heart rate in beats per minute (BPM), averaged over the last 8 valid beats |
 | `temp` | Finger surface temperature in °C |
-| `hrv_sdnn` | Heart-rate variability — SDNN.  Measures how spread out the beat-to-beat timing is.  Higher is generally healthier. |
-| `hrv_rmssd` | Heart-rate variability — RMSSD.  Measures rapid, short-term changes between consecutive beats.  Also higher = healthier. |
+| `hrv_sdnn` | Heart-rate variability — SDNN over the 60 s window.  Measures how spread out the beat-to-beat timing is.  Higher is generally healthier.  **Omitted** when the window fails the quality checks. |
+| `hrv_rmssd` | Heart-rate variability — RMSSD over the 60 s window.  Measures rapid, short-term changes between consecutive beats.  Also higher = healthier.  **Omitted** when the window fails the quality checks. |
 | `beat_count` | Number of valid heartbeats captured in the 60-second window |
 | `patientId` | Identifies which patient the reading belongs to |
 | `deviceId` | Identifies which device sent it |
@@ -242,8 +242,8 @@ This usually means DNS resolution failed or the broker address in `secrets.h` is
 **Upload fails with "Permission denied" on the port**
 On Linux/macOS run `sudo chmod 666 /dev/ttyUSB0` (replace with your actual port).  On macOS you may need to install the CP2102 USB driver.
 
-**SDNN and RMSSD are always 0**
-These require at least 2 valid beats to calculate.  If the window is too short or the finger is not detected, they will default to 0.
+**`hrv_sdnn` / `hrv_rmssd` are missing from the published reading**
+HRV is only sent when the 60 s window passes its quality checks: at least 80% of the beat intervals must be within 20% of the window's median, and those clean intervals must cover at least 70% of the window.  Movement, a loose finger or missed beats make it fail; the serial line then shows `HRV=-- (quality check failed, NN=x/y)`.  Keep the finger still on the sensor for the whole window.  The device never sends 0 or an old value in place of a missing HRV.
 
 ---
 

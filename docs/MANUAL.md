@@ -112,13 +112,17 @@ When a beat is confirmed:
 - BPM is calculated from that gap: `BPM = 60 000 / gap_ms`
 - Only beats between 45 and 150 BPM are accepted — anything outside that range is treated as noise or a motion artefact and discarded
 
-Up to 8 beats are kept in a rolling circular buffer.  Older beats fall off as new ones arrive.
+Every accepted RR interval in the current 60 s window is stored in the order the beats happened.  The window starts empty after each upload.  If a beat is rejected, the next interval is marked as not following the previous one, so no "successive difference" is ever taken across a gap.
+
+Heart rate uses a separate rolling buffer of the last 8 valid beats.
 
 ### Step 3 — Averaging and HRV calculation
 
 At upload time:
-- **Average BPM** is the mean of all stored valid beats
-- **SDNN** and **RMSSD** are calculated from the stored RR intervals (see [Understanding HRV](#understanding-heart-rate-variability))
+- **Average BPM** is the mean of the last 8 valid beats
+- **Artefact check:** intervals more than 20% away from the window's median (typically a missed or an extra beat) are excluded
+- **Quality gate:** if more than 20% of intervals were excluded, or the remaining intervals cover less than 70% of the 60 s window, HRV is **not reported** for this reading (the `hrv_sdnn` and `hrv_rmssd` fields are left out of the message)
+- **SDNN** and **RMSSD** are calculated from the remaining clean intervals (see [Understanding HRV](#understanding-heart-rate-variability))
 
 ### Step 4 — Upload
 
@@ -157,7 +161,7 @@ MQTT connected
 [BEAT] delta=809ms raw=74.2
 [IR] 89231
 [BEAT] delta=834ms raw=71.9
-IR=89231  | BPM=73.1  | Avg BPM=73  | Temp=33.54°C | SDNN=16.2 | RMSSD=11.4
+IR=89231  | BPM=73.1  | Avg BPM=73  | Temp=33.54°C | SDNN=16.2 | RMSSD=11.4 | NN=69/72
 [MQTT] Publish OK
 ---
 Entering light sleep for 300 seconds...
@@ -193,9 +197,9 @@ DialOG reports two standard HRV metrics:
 ### SDNN (Standard Deviation of NN intervals)
 
 SDNN measures the overall spread of your beat-to-beat intervals.  It is calculated by:
-1. Finding the average interval across all stored beats
+1. Finding the average of the clean intervals in the 60 s window
 2. Measuring how far each interval deviates from that average
-3. Taking the square root of the average squared deviation
+3. Taking the square root of the summed squared deviations divided by (n − 1), the sample standard deviation
 
 A higher SDNN generally indicates a more adaptable autonomic nervous system.
 
@@ -209,7 +213,7 @@ A higher SDNN generally indicates a more adaptable autonomic nervous system.
 
 ### RMSSD (Root Mean Square of Successive Differences)
 
-RMSSD zooms in on short-term, rapid changes — specifically the differences between *consecutive* pairs of intervals rather than the whole group.  It is more sensitive to quick fluctuations driven by breathing (respiratory sinus arrhythmia).
+RMSSD zooms in on short-term, rapid changes — specifically the differences between *consecutive* pairs of intervals rather than the whole group.  Only pairs where both intervals are clean and directly follow each other are used.  It is more sensitive to quick fluctuations driven by breathing (respiratory sinus arrhythmia).
 
 A higher RMSSD indicates strong parasympathetic (rest-and-digest) activity, which is associated with good recovery and cardiovascular health.
 
@@ -291,7 +295,7 @@ Each message is a JSON object:
   "temp":       33.21,
   "hrv_sdnn":   18.3,
   "hrv_rmssd":  12.1,
-  "beat_count": 12,
+  "beat_count": 73,
   "esp_millis": 47823
 }
 ```
@@ -309,6 +313,8 @@ Any MQTT client can subscribe to receive readings.  To subscribe to all patients
 1. Add an MQTT-in node pointed at your broker.
 2. Set the topic to `vitals/#`.
 3. Connect a JSON parse node, then route values to a dashboard gauge.
+
+If a window fails the HRV quality checks, `hrv_sdnn` and `hrv_rmssd` are omitted from that message; all other fields are still sent.
 
 ### Retained messages
 

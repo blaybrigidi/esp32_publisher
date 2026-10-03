@@ -126,7 +126,7 @@ void setup_wifi()
 // MQTT broker.  The broker keeps the last message so the dashboard always
 // shows the most recent reading even if it reconnects after a drop.
 // ─────────────────────────────────────────────────────────────────────────────
-bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd, byte beatCount)
+bool publishReading(float hr, float temp, bool hrvValid, float hrv_sdnn, float hrv_rmssd, byte beatCount)
 {
     // Build the MQTT topic from the patient ID, e.g. "vitals/patient_001"
     char topic[64];
@@ -142,8 +142,13 @@ bool publishReading(float hr, float temp, float hrv_sdnn, float hrv_rmssd, byte 
     doc["deviceId"]    = DEVICE_ID;
     doc["hr"]          = hr;          // Heart rate in beats per minute
     doc["temp"]        = temp;        // Finger temperature in °C
-    doc["hrv_sdnn"]    = hrv_sdnn;    // Heart-rate variability measure 1
-    doc["hrv_rmssd"]   = hrv_rmssd;   // Heart-rate variability measure 2
+    // HRV is only sent when this window passed the quality checks.  A missing
+    // value means "not measured" — we never send 0 or a stale number instead.
+    if (hrvValid)
+    {
+        doc["hrv_sdnn"]  = hrv_sdnn;  // Heart-rate variability measure 1
+        doc["hrv_rmssd"] = hrv_rmssd; // Heart-rate variability measure 2
+    }
     doc["beat_count"]  = beatCount;   // Number of valid beats detected this window
     doc["esp_millis"]  = millis();    // Device uptime — useful for debugging timing
 
@@ -178,62 +183,139 @@ boolean reconnect()
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Heart-rate & heart-rate variability (HRV) state
+// Heart-rate state
 //
-// We keep a rolling buffer of the last 8 beats.  Each slot stores:
-//   rates[]      — the BPM calculated for that beat
-//   rrIntervals[]— the time gap between that beat and the previous one (ms)
-//
-// HRV (variability in those gaps) is an indicator of autonomic nervous system
-// health.  Diabetic patients often show reduced HRV.
+// Heart rate is reported as the average BPM of the last 8 valid beats.
 // ─────────────────────────────────────────────────────────────────────────────
 const byte RATE_SIZE = 8;
 byte  rates[RATE_SIZE];       // Rolling BPM readings
-float rrIntervals[RATE_SIZE]; // Rolling beat-to-beat time gaps (ms)
 byte  rateSpot  = 0;          // Write position in the circular buffer
 byte  rateCount = 0;          // How many valid slots are filled so far
-long  lastBeat  = 0;          // Timestamp of the most recent beat (ms)
+long  lastBeat  = 0;          // Timestamp of the most recent beat (ms); 0 = none yet
 float beatsPerMinute = 0;     // BPM from the most recent single beat gap
 int   beatAvg   = 0;          // Average BPM across the last RATE_SIZE beats
 byte  newBeatsThisCycle = 0;  // Valid beats collected since the last upload
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SDNN — Standard Deviation of beat-to-beat intervals.
-// Higher values generally mean a healthier, more adaptable heart rhythm.
+// Heart-rate variability (HRV) state
+//
+// HRV is computed from every beat-to-beat (RR) interval in the current 60 s
+// window, in the order the beats happened.  The window starts empty after each
+// upload, so a reading never mixes in intervals from a previous cycle.
+//
+// rrFollowsPrev[i] is true when interval i directly follows interval i-1, i.e.
+// no beat was rejected in between.  RMSSD only uses such pairs, so a rejected
+// or missed beat never produces a "successive difference" across a gap.
+//
+// HRV (variability in those gaps) is an indicator of autonomic nervous system
+// health.  Diabetic patients often show reduced HRV.
 // ─────────────────────────────────────────────────────────────────────────────
-float computeSDNN(float *rr, byte count)
+const int MAX_RR = 180;           // 60 s at 150 BPM is 150 intervals, plus headroom
+float windowRR[MAX_RR];           // RR intervals (ms) accepted in this window
+bool  rrFollowsPrev[MAX_RR];      // true if interval i directly follows interval i-1
+int   rrCount = 0;                // How many intervals are stored this window
+bool  prevBeatAccepted = false;   // Was the previous beat's interval accepted?
+
+// Quality rules (same as the validation study):
+const float ARTEFACT_TOLERANCE = 0.20f; // reject intervals >20% away from the window median
+const float MIN_ACCEPTED_SHARE = 0.80f; // at least 80% of intervals must survive that rule
+const float MIN_COVERAGE       = 0.70f; // clean intervals must cover >=70% of the window
+
+struct HrvResult
 {
-    if (count < 2) return 0.0f;
+    bool  valid; // false = this window didn't pass the quality checks
+    float sdnn;  // ms
+    float rmssd; // ms
+    int   nn;    // number of clean (normal-to-normal) intervals used
+};
 
-    // Step 1: find the average interval
-    float mean = 0;
-    for (byte i = 0; i < count; i++) mean += rr[i];
-    mean /= count;
+// Discard everything collected for the current HRV window.
+void resetHrvWindow()
+{
+    rrCount = 0;
+    prevBeatAccepted = false;
+}
 
-    // Step 2: measure how spread out the values are around that average
-    float variance = 0;
-    for (byte i = 0; i < count; i++)
-        variance += (rr[i] - mean) * (rr[i] - mean);
-
-    return sqrt(variance / count);
+// Median of the stored intervals (insertion sort on a copy; at most MAX_RR values).
+float medianRR()
+{
+    static float sorted[MAX_RR];
+    for (int i = 0; i < rrCount; i++)
+    {
+        float v = windowRR[i];
+        int j = i - 1;
+        while (j >= 0 && sorted[j] > v)
+        {
+            sorted[j + 1] = sorted[j];
+            j--;
+        }
+        sorted[j + 1] = v;
+    }
+    return (rrCount % 2) ? sorted[rrCount / 2]
+                         : (sorted[rrCount / 2 - 1] + sorted[rrCount / 2]) / 2.0f;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RMSSD — Root Mean Square of Successive Differences.
-// Looks at how much consecutive beat gaps differ from each other.
-// It is more sensitive to rapid changes in heart rhythm than SDNN.
+// Compute SDNN and RMSSD for the current window.
+//
+// SDNN  — standard deviation of the clean intervals (sample SD, n-1).
+//         Higher values generally mean a healthier, more adaptable rhythm.
+// RMSSD — root mean square of differences between *successive* clean
+//         intervals.  More sensitive to rapid, breathing-driven changes.
+//
+// Steps:
+//   1. Mark intervals more than 20% away from the window median as artefacts
+//      (missed or extra beats).
+//   2. Quality gate: if more than 20% were rejected, or the clean intervals
+//      cover less than 70% of the window, report no HRV for this window.
+//   3. Compute SDNN over the clean intervals, and RMSSD over pairs that are
+//      both clean and truly consecutive.
 // ─────────────────────────────────────────────────────────────────────────────
-float computeRMSSD(float *rr, byte count)
+HrvResult computeWindowHRV(unsigned long windowMs)
 {
-    if (count < 2) return 0.0f;
+    HrvResult r = {false, 0.0f, 0.0f, 0};
+    if (rrCount < 3) return r;
+
+    float median = medianRR();
+    static bool clean[MAX_RR];
+    int   nn  = 0;
+    float sum = 0;
+    for (int i = 0; i < rrCount; i++)
+    {
+        clean[i] = fabsf(windowRR[i] - median) < ARTEFACT_TOLERANCE * median;
+        if (clean[i])
+        {
+            nn++;
+            sum += windowRR[i];
+        }
+    }
+    r.nn = nn;
+
+    if (nn < 3 || nn < MIN_ACCEPTED_SHARE * rrCount || sum < MIN_COVERAGE * windowMs)
+        return r;
+
+    float mean = sum / nn;
+    float variance = 0;
+    for (int i = 0; i < rrCount; i++)
+        if (clean[i]) variance += (windowRR[i] - mean) * (windowRR[i] - mean);
 
     float sumSq = 0;
-    for (byte i = 1; i < count; i++)
+    int   pairs = 0;
+    for (int i = 1; i < rrCount; i++)
     {
-        float diff = rr[i] - rr[i - 1]; // Gap between consecutive intervals
-        sumSq += diff * diff;
+        if (clean[i] && clean[i - 1] && rrFollowsPrev[i])
+        {
+            float diff = windowRR[i] - windowRR[i - 1];
+            sumSq += diff * diff;
+            pairs++;
+        }
     }
-    return sqrt(sumSq / (count - 1));
+    if (pairs < 2) return r;
+
+    r.sdnn  = sqrtf(variance / (nn - 1));
+    r.rmssd = sqrtf(sumSq / pairs);
+    r.valid = true;
+    return r;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -312,15 +394,25 @@ void loop()
         beatAvg = 0;
         beatsPerMinute = 0;
         memset(rates, 0, sizeof(rates));
-        memset(rrIntervals, 0, sizeof(rrIntervals));
+
+        // Keep the intervals already collected this window, but make sure the
+        // first beat after the finger returns isn't measured across the gap.
+        lastBeat = 0;
+        prevBeatAccepted = false;
     }
     else if (checkForBeat(irValue))
     {
         // A heartbeat was detected.  Calculate BPM from the time since the last beat.
-        long delta = millis() - lastBeat;
-        lastBeat   = millis();
+        long now   = millis();
+        bool first = (lastBeat == 0); // no previous beat to measure from
+        long delta = now - lastBeat;
+        lastBeat   = now;
 
-        if (delta > 0)
+        if (first)
+        {
+            prevBeatAccepted = false;
+        }
+        else if (delta > 0)
         {
             beatsPerMinute = 60.0 / (delta / 1000.0);
             Serial.printf("[BEAT] delta=%ldms raw=%.1f\n", delta, beatsPerMinute);
@@ -329,8 +421,7 @@ void loop()
             // Values outside this are almost certainly noise or motion artefacts.
             if (beatsPerMinute > 45 && beatsPerMinute < 150)
             {
-                rates[rateSpot]       = (byte)beatsPerMinute;
-                rrIntervals[rateSpot] = (float)delta;
+                rates[rateSpot] = (byte)beatsPerMinute;
                 rateSpot = (rateSpot + 1) % RATE_SIZE; // Advance the circular buffer
                 if (rateCount < RATE_SIZE) rateCount++;
                 newBeatsThisCycle++;
@@ -340,6 +431,20 @@ void loop()
                 for (byte i = 0; i < rateCount; i++)
                     beatAvg += rates[i];
                 beatAvg /= rateCount;
+
+                // Store the interval for this window's HRV, in time order
+                if (rrCount < MAX_RR)
+                {
+                    windowRR[rrCount]      = (float)delta;
+                    rrFollowsPrev[rrCount] = prevBeatAccepted;
+                    rrCount++;
+                }
+                prevBeatAccepted = true;
+            }
+            else
+            {
+                // Rejected as noise: the next interval doesn't follow a stored one
+                prevBeatAccepted = false;
             }
         }
     }
@@ -369,12 +474,15 @@ void loop()
         // Gather all values for this upload window
         float tempC     = thermistor.read();          // °C
         float heartRate = beatAvg > 0 ? (float)beatAvg : beatsPerMinute;
-        float sdnn      = computeSDNN(rrIntervals, rateCount);
-        float rmssd     = computeRMSSD(rrIntervals, rateCount);
+        HrvResult hrv   = computeWindowHRV(PUBLISH_INTERVAL_MS);
 
         // Print a summary line to the console
-        Serial.printf("IR=%-7ld | BPM=%-6.1f | Avg BPM=%-4d | Temp=%.2f°C | SDNN=%.1f | RMSSD=%.1f",
-                      irValue, beatsPerMinute, beatAvg, tempC, sdnn, rmssd);
+        Serial.printf("IR=%-7ld | BPM=%-6.1f | Avg BPM=%-4d | Temp=%.2f°C",
+                      irValue, beatsPerMinute, beatAvg, tempC);
+        if (hrv.valid)
+            Serial.printf(" | SDNN=%.1f | RMSSD=%.1f | NN=%d/%d", hrv.sdnn, hrv.rmssd, hrv.nn, rrCount);
+        else
+            Serial.printf(" | HRV=-- (quality check failed, NN=%d/%d)", hrv.nn, rrCount);
         if (irValue < 50000) Serial.print(" | No finger detected");
         Serial.println();
 
@@ -386,7 +494,7 @@ void loop()
         }
         else
         {
-            bool ok = publishReading(heartRate, tempC, sdnn, rmssd, newBeatsThisCycle);
+            bool ok = publishReading(heartRate, tempC, hrv.valid, hrv.sdnn, hrv.rmssd, newBeatsThisCycle);
             Serial.printf("[MQTT] Publish %s\n", ok ? "OK" : "FAILED");
         }
 
@@ -449,6 +557,7 @@ void loop()
         // before calculating a rate, which is the correct starting condition.
         lastBeat = 0;
         newBeatsThisCycle = 0;
+        resetHrvWindow(); // the next reading's HRV uses only the next window's beats
 
         // Try to reconnect to MQTT up to 3 times.  The first attempt often
         // fails because the encrypted handshake needs the network fully stable.
