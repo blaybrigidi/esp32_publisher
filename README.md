@@ -2,7 +2,7 @@
 
 DialOG is a small wearable device that continuously measures a patient's heart rate and finger temperature, then sends those readings to a cloud dashboard over WiFi. It is designed with diabetic patients in mind, where early detection of changes in heart rhythm and peripheral temperature can indicate complications before they become serious.
 
-The device is built around an ESP32 microcontroller paired with the MAX30102 optical heart-rate sensor. It collects data for 15 seconds, uploads a summary, sleeps briefly to save battery, then repeats — all without losing its WiFi connection.
+The device is built around an ESP32 microcontroller paired with the MAX30102 optical heart-rate sensor. It collects data for 60 seconds, uploads a summary, sleeps for 5 minutes to save battery, then repeats — all without losing its WiFi connection.
 
 ---
 
@@ -164,11 +164,11 @@ Once your finger is on the sensor:
 
 ```
 [IR] 87432
-[BEAT] delta=812ms raw=73.9
+[BEAT] delta=812.4ms raw=73.9
 [IR] 91204
-IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | SDNN=18.3 | RMSSD=12.1
+IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | sample=10.012ms | gaps=0 | SDNN=18.3 | RMSSD=12.1 | NN=71/73
 [MQTT] Publish OK
-Entering light sleep for 10 seconds...
+Entering light sleep for 300 seconds...
 Woke from light sleep.
 DNS resolved: 18.185.42.10
 MQTT connected
@@ -184,9 +184,9 @@ Each reading sent to the cloud contains the following fields:
 |---|---|
 | `hr` | Heart rate in beats per minute (BPM), averaged over the last 8 valid beats |
 | `temp` | Finger surface temperature in °C |
-| `hrv_sdnn` | Heart-rate variability — SDNN.  Measures how spread out the beat-to-beat timing is.  Higher is generally healthier. |
-| `hrv_rmssd` | Heart-rate variability — RMSSD.  Measures rapid, short-term changes between consecutive beats.  Also higher = healthier. |
-| `beat_count` | Number of valid heartbeats captured in the 15-second window |
+| `hrv_sdnn` | Heart-rate variability — SDNN over the 60 s window.  Measures how spread out the beat-to-beat timing is.  Higher is generally healthier.  **Omitted** when the window fails the quality checks. |
+| `hrv_rmssd` | Heart-rate variability — RMSSD over the 60 s window.  Measures rapid, short-term changes between consecutive beats.  Also higher = healthier.  **Omitted** when the window fails the quality checks. |
+| `beat_count` | Number of valid heartbeats captured in the 60-second window |
 | `patientId` | Identifies which patient the reading belongs to |
 | `deviceId` | Identifies which device sent it |
 | `esp_millis` | How many milliseconds the device has been running — useful for spotting gaps |
@@ -201,15 +201,15 @@ These two values at the top of `src/main.cpp` are the most likely things you wil
 
 ```cpp
 // How long (in milliseconds) the device collects data before uploading
-const unsigned long PUBLISH_INTERVAL_MS = 15000;  // 15 seconds
+const unsigned long PUBLISH_INTERVAL_MS = 60000;  // 60 seconds
 
 // How long the device sleeps between uploads (in microseconds)
-#define SLEEP_DURATION_US (10ULL * 1000000ULL)    // 10 seconds (testing)
-// For production use 5 minutes:
-// #define SLEEP_DURATION_US (300ULL * 1000000ULL)
+#define SLEEP_DURATION_US (300ULL * 1000000ULL)   // 5 minutes
+// For bench testing only, e.g. 10 seconds — don't commit it:
+// #define SLEEP_DURATION_US (10ULL * 1000000ULL)
 ```
 
-A shorter collection window means more frequent uploads but less data per reading.  A longer sleep saves more battery.
+A shorter collection window means more frequent uploads but less data per reading, and HRV gets much less reliable below about 60 seconds.  A longer sleep saves more battery.  With the defaults the device is awake about 64 s out of every ~364 s (about 17–18% duty cycle).
 
 ---
 
@@ -242,8 +242,8 @@ This usually means DNS resolution failed or the broker address in `secrets.h` is
 **Upload fails with "Permission denied" on the port**
 On Linux/macOS run `sudo chmod 666 /dev/ttyUSB0` (replace with your actual port).  On macOS you may need to install the CP2102 USB driver.
 
-**SDNN and RMSSD are always 0**
-These require at least 2 valid beats to calculate.  If the window is too short or the finger is not detected, they will default to 0.
+**`hrv_sdnn` / `hrv_rmssd` are missing from the published reading**
+HRV is only sent when the 60 s window passes its quality checks: at least 80% of the beat intervals must be within 20% of the window's median, and those clean intervals must cover at least 70% of the window.  Movement, a loose finger or missed beats make it fail; the serial line then shows `HRV=-- (quality check failed, NN=x/y)`.  Keep the finger still on the sensor for the whole window.  The device never sends 0 or an old value in place of a missing HRV.
 
 ---
 
