@@ -364,7 +364,7 @@ void loop()
     if (millis() - lastPublishTime >= PUBLISH_INTERVAL_MS)
     {
         // Gather all values for this upload window
-        float tempC     = thermistor.readTemperatureC();
+        float tempC     = thermistor.read();          // °C
         float heartRate = beatAvg > 0 ? (float)beatAvg : beatsPerMinute;
         float sdnn      = computeSDNN(rrIntervals, rateCount);
         float rmssd     = computeRMSSD(rrIntervals, rateCount);
