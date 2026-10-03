@@ -116,6 +116,8 @@ Every accepted RR interval in the current 60 s window is stored in the order the
 
 Heart rate uses a separate rolling buffer of the last 8 valid beats.
 
+**Beat timing.**  The firmware reads every sample from the sensor's FIFO (100 samples per second) and times each beat by its position in that sample stream, not by `millis()` when the loop notices it.  `checkForBeat()` fires when its filtered signal crosses zero between two samples; the firmware interpolates where the crossing falls, giving the beat time to a fraction of a sample (about 1 ms instead of 10 ms).  Sample positions are converted to milliseconds using the sensor's sample period, which is measured against `millis()` over each window and shown as `sample=…ms` in the serial output.  If samples are lost (the loop stalled long enough to overflow the sensor's buffer), the firmware treats it as a gap and never measures an interval across it.  The sensor configuration and the beat detection itself are unchanged.
+
 ### Step 3 — Averaging and HRV calculation
 
 At upload time:
@@ -145,7 +147,7 @@ Connect at **115 200 baud**.  The output uses a consistent format so you can spo
 | Prefix | What it means |
 |---|---|
 | `[IR]` | Raw infrared light level printed every 500 ms.  Should fluctuate with your pulse. |
-| `[BEAT]` | A heartbeat was detected.  Shows the gap in ms and the instantaneous BPM. |
+| `[BEAT]` | A heartbeat was detected.  Shows the gap in ms (to 0.1 ms, from the sample clock) and the instantaneous BPM. |
 | `[MQTT]` | Network activity — connection attempts, publish results. |
 
 ### Example healthy session
@@ -156,12 +158,12 @@ IP address: 192.168.1.42
 MQTT connected
 [IR] 82341
 [IR] 88102
-[BEAT] delta=821ms raw=73.1
+[BEAT] delta=821.3ms raw=73.1
 [IR] 91450
-[BEAT] delta=809ms raw=74.2
+[BEAT] delta=808.7ms raw=74.2
 [IR] 89231
-[BEAT] delta=834ms raw=71.9
-IR=89231  | BPM=73.1  | Avg BPM=73  | Temp=33.54°C | SDNN=16.2 | RMSSD=11.4 | NN=69/72
+[BEAT] delta=834.1ms raw=71.9
+IR=89231  | BPM=73.1  | Avg BPM=73  | Temp=33.54°C | sample=10.012ms | gaps=0 | SDNN=16.2 | RMSSD=11.4 | NN=69/72
 [MQTT] Publish OK
 ---
 Entering light sleep for 300 seconds...
@@ -170,7 +172,7 @@ DNS resolved: 18.185.42.10
 [MQTT] Connect attempt 1/3
 MQTT connected
 [IR] 87002
-[BEAT] delta=818ms raw=73.3
+[BEAT] delta=817.9ms raw=73.3
 ```
 
 ### Example — no finger detected
@@ -353,6 +355,9 @@ Settings defined in `src/secrets.h`:
 
 **Ultra-short recording window**
 60 seconds provides roughly 50–90 beats.  Clinical standards (Task Force 1996) define short-term HRV over 5 minutes.  RMSSD from 60 s agrees closely with the 5-minute value (Munoz et al. 2015), but SDNN grows with recording length, so the 60 s SDNN reads lower than a 5-minute SDNN and should not be compared against 5-minute reference ranges.
+
+**Pulse-based beat timing**
+Beat-to-beat intervals come from the finger pulse (PPG), not an ECG.  The firmware removes the timing error caused by the 100 Hz sample rate, but it cannot remove variation in where `checkForBeat()`'s zero crossing lands on each pulse — for example when breathing shifts the signal's baseline — or natural variation in pulse transit time.  For patients with low HRV (RMSSD of 10–20 ms) this can still make RMSSD read high.  Validate against an ECG chest strap before relying on low values.
 
 **Single-patient per device**
 Each device is configured for one patient.  To monitor multiple patients, flash separate devices with different `PATIENT_ID` values.

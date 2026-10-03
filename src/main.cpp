@@ -191,7 +191,7 @@ const byte RATE_SIZE = 8;
 byte  rates[RATE_SIZE];       // Rolling BPM readings
 byte  rateSpot  = 0;          // Write position in the circular buffer
 byte  rateCount = 0;          // How many valid slots are filled so far
-long  lastBeat  = 0;          // Timestamp of the most recent beat (ms); 0 = none yet
+double lastBeatSample = -1;   // Sample position of the most recent beat; <0 = none yet
 float beatsPerMinute = 0;     // BPM from the most recent single beat gap
 int   beatAvg   = 0;          // Average BPM across the last RATE_SIZE beats
 byte  newBeatsThisCycle = 0;  // Valid beats collected since the last upload
@@ -215,6 +215,59 @@ float windowRR[MAX_RR];           // RR intervals (ms) accepted in this window
 bool  rrFollowsPrev[MAX_RR];      // true if interval i directly follows interval i-1
 int   rrCount = 0;                // How many intervals are stored this window
 bool  prevBeatAccepted = false;   // Was the previous beat's interval accepted?
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Beat timing
+//
+// Beats are timed on the sensor's own sample clock, not with millis() when the
+// loop happens to notice them.  The sensor delivers 100 samples/s (setup()
+// defaults: 400 Hz with 4x on-chip averaging), so millis() at detection is only
+// good to ~10 ms plus loop jitter — enough to inflate RMSSD noticeably for
+// patients whose true RMSSD is low (10-20 ms).
+//
+// checkForBeat() reports a beat when its filtered signal crosses zero going up,
+// between the previous sample and the current one.  Interpolating where that
+// crossing falls gives the beat time to a fraction of a sample.  The detection
+// itself, and the sensor configuration, are unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+extern int16_t IR_AC_Signal_Current;  // filtered values inside checkForBeat()
+extern int16_t IR_AC_Signal_Previous; // (globals in the SparkFun heartRate.cpp)
+
+const float NOMINAL_SAMPLE_MS = 10.0f;   // 100 samples per second
+const unsigned long FIFO_GAP_MS = 250;   // longer than this and the 32-sample FIFO may have overflowed
+uint32_t sampleIndex  = 0;               // samples received since boot
+uint32_t anchorSample = 0;               // start of the current unbroken stretch of samples
+unsigned long anchorMs = 0;
+unsigned long lastDrainMs = 0;
+long lastIR = 0;                         // most recent IR value (for diagnostics)
+uint16_t gapsThisWindow = 0;             // sample gaps seen this window (for diagnostics)
+
+// Milliseconds per sample.  The sensor's own oscillator may be off by a few
+// percent, so this is calibrated against millis() over each unbroken stretch of
+// at least 30 s (when the stretch ends: before sleeping, or at a gap) and held
+// constant while a window is being timed (a value that changed mid-window would
+// distort SDNN).
+float sampleMs = NOMINAL_SAMPLE_MS;
+
+// endMs = time of the last sample drain that belongs to the stretch
+void calibrateSampleClock(unsigned long endMs)
+{
+    uint32_t n = sampleIndex - anchorSample;
+    if (n < 3000) return; // too short to calibrate reliably
+    float measured = (float)(endMs - anchorMs) / (float)n;
+    if (measured > 9.0f && measured < 11.0f) // ignore anything implausible
+        sampleMs = measured;
+}
+
+// Samples were lost (loop stalled, sensor FIFO overflowed, or we just woke up):
+// don't measure an interval across the gap, and start a new calibration stretch.
+void markSampleGap()
+{
+    lastBeatSample   = -1;
+    prevBeatAccepted = false;
+    anchorSample     = sampleIndex;
+    anchorMs         = millis();
+}
 
 // Quality rules (same as the validation study):
 const float ARTEFACT_TOLERANCE = 0.20f; // reject intervals >20% away from the window median
@@ -361,30 +414,17 @@ void setup()
 
     // Set up the thermistor: pin 32, 50 kΩ fixed resistor, 50 kΩ nominal NTC
     thermistor.begin(THERMISTOR_PIN, 50000, 50000);
+
+    // Start the sample clock
+    markSampleGap();
+    lastDrainMs = millis();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main loop — runs repeatedly while the device is awake.
-//
-// Each pass through this loop:
-//   1. Reads the infrared light level from the sensor.
-//   2. If a fingertip is detected, checks whether a heartbeat just occurred.
-//   3. Keeps the MQTT connection alive (reconnects if needed).
-//   4. Every 60 seconds, sends all collected readings and then sleeps for 5 minutes.
+// Handle one IR sample from the sensor (called for every sample, in order).
 // ─────────────────────────────────────────────────────────────────────────────
-void loop()
+void processSample(long irValue)
 {
-    long irValue = particleSensor.getIR();
-
-    // Print the raw IR sensor level every 500 ms so we can verify the sensor
-    // is seeing pulsatile blood flow (the number should rise and fall with the pulse).
-    static unsigned long lastIRDiag = 0;
-    if (millis() - lastIRDiag >= 500)
-    {
-        Serial.printf("[IR] %ld\n", irValue);
-        lastIRDiag = millis();
-    }
-
     if (irValue < 50000)
     {
         // IR level below 50 000 means no finger is on the sensor.
@@ -397,16 +437,21 @@ void loop()
 
         // Keep the intervals already collected this window, but make sure the
         // first beat after the finger returns isn't measured across the gap.
-        lastBeat = 0;
+        lastBeatSample   = -1;
         prevBeatAccepted = false;
     }
     else if (checkForBeat(irValue))
     {
-        // A heartbeat was detected.  Calculate BPM from the time since the last beat.
-        long now   = millis();
-        bool first = (lastBeat == 0); // no previous beat to measure from
-        long delta = now - lastBeat;
-        lastBeat   = now;
+        // A heartbeat was detected.  The filtered signal crossed zero between
+        // the previous sample and this one; interpolate where.
+        float prev = IR_AC_Signal_Previous;
+        float cur  = IR_AC_Signal_Current;
+        float frac = (cur > prev) ? -prev / (cur - prev) : 1.0f;
+        double beatSample = (double)(sampleIndex - 1) + frac;
+
+        bool  first = (lastBeatSample < 0); // no previous beat to measure from
+        float delta = (float)((beatSample - lastBeatSample) * sampleMs);
+        lastBeatSample = beatSample;
 
         if (first)
         {
@@ -414,8 +459,8 @@ void loop()
         }
         else if (delta > 0)
         {
-            beatsPerMinute = 60.0 / (delta / 1000.0);
-            Serial.printf("[BEAT] delta=%ldms raw=%.1f\n", delta, beatsPerMinute);
+            beatsPerMinute = 60000.0f / delta;
+            Serial.printf("[BEAT] delta=%.1fms raw=%.1f\n", delta, beatsPerMinute);
 
             // Only keep beats in a physiologically plausible range (45–150 BPM).
             // Values outside this are almost certainly noise or motion artefacts.
@@ -435,7 +480,7 @@ void loop()
                 // Store the interval for this window's HRV, in time order
                 if (rrCount < MAX_RR)
                 {
-                    windowRR[rrCount]      = (float)delta;
+                    windowRR[rrCount]      = delta;
                     rrFollowsPrev[rrCount] = prevBeatAccepted;
                     rrCount++;
                 }
@@ -447,6 +492,60 @@ void loop()
                 prevBeatAccepted = false;
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main loop — runs repeatedly while the device is awake.
+//
+// Each pass through this loop:
+//   1. Reads the infrared light level from the sensor.
+//   2. If a fingertip is detected, checks whether a heartbeat just occurred.
+//   3. Keeps the MQTT connection alive (reconnects if needed).
+//   4. Every 60 seconds, sends all collected readings and then sleeps for 5 minutes.
+// ─────────────────────────────────────────────────────────────────────────────
+void loop()
+{
+    // ── Read every new sample from the sensor ──────────────────────────────────
+    // checkForBeat() needs an unbroken sample stream, and beat timing counts
+    // samples, so drain the sensor's FIFO each pass instead of only reading the
+    // latest value.  The library holds 4 samples per check(); if more arrived
+    // (or the loop stalled long enough for the FIFO to overflow), samples were
+    // lost and we mark a gap rather than time a beat across it.
+    unsigned long nowMs = millis();
+    unsigned long prevDrainMs = lastDrainMs;
+    bool stalled = (nowMs - prevDrainMs > FIFO_GAP_MS);
+    lastDrainMs = nowMs;
+
+    uint16_t arrived = particleSensor.check();
+    // 4 or more new samples overflow the library's 4-slot buffer, so some were lost
+    if (stalled || arrived >= STORAGE_SIZE)
+    {
+        calibrateSampleClock(prevDrainMs); // the unbroken stretch ended at the last good drain
+        gapsThisWindow++;
+        while (particleSensor.available()) particleSensor.nextSample(); // discard partial data
+        sampleIndex += arrived;
+        markSampleGap();
+    }
+    else
+    {
+        while (particleSensor.available())
+        {
+            lastIR = particleSensor.getFIFOIR();
+            particleSensor.nextSample();
+            sampleIndex++;
+            processSample(lastIR);
+        }
+    }
+    long irValue = lastIR;
+
+    // Print the raw IR sensor level every 500 ms so we can verify the sensor
+    // is seeing pulsatile blood flow (the number should rise and fall with the pulse).
+    static unsigned long lastIRDiag = 0;
+    if (millis() - lastIRDiag >= 500)
+    {
+        Serial.printf("[IR] %ld\n", irValue);
+        lastIRDiag = millis();
     }
 
     // ── Keep the MQTT connection alive ─────────────────────────────────────────
@@ -475,10 +574,11 @@ void loop()
         float tempC     = thermistor.read();          // °C
         float heartRate = beatAvg > 0 ? (float)beatAvg : beatsPerMinute;
         HrvResult hrv   = computeWindowHRV(PUBLISH_INTERVAL_MS);
+        calibrateSampleClock(lastDrainMs); // before sleeping, so the sleep isn't counted
 
         // Print a summary line to the console
-        Serial.printf("IR=%-7ld | BPM=%-6.1f | Avg BPM=%-4d | Temp=%.2f°C",
-                      irValue, beatsPerMinute, beatAvg, tempC);
+        Serial.printf("IR=%-7ld | BPM=%-6.1f | Avg BPM=%-4d | Temp=%.2f°C | sample=%.3fms | gaps=%u",
+                      irValue, beatsPerMinute, beatAvg, tempC, sampleMs, gapsThisWindow);
         if (hrv.valid)
             Serial.printf(" | SDNN=%.1f | RMSSD=%.1f | NN=%d/%d", hrv.sdnn, hrv.rmssd, hrv.nn, rrCount);
         else
@@ -551,11 +651,11 @@ void loop()
         // refused" error even though DNS already succeeded.
         delay(1500);
 
-        // lastBeat was set before we slept, so the gap since then would include
+        // The last beat was before we slept, so the gap since then would include
         // the entire sleep period and produce a nonsense BPM on the first beat.
-        // Resetting it forces the algorithm to wait for two consecutive beats
+        // Forgetting it forces the algorithm to wait for two consecutive beats
         // before calculating a rate, which is the correct starting condition.
-        lastBeat = 0;
+        lastBeatSample = -1;
         newBeatsThisCycle = 0;
         resetHrvWindow(); // the next reading's HRV uses only the next window's beats
 
@@ -576,6 +676,9 @@ void loop()
         // now means the beat-detection algorithm starts fresh on the next window
         // instead of processing a backlog of stale samples.
         particleSensor.clearFIFO();
+        markSampleGap();           // restart beat timing on the fresh sample stream
+        lastDrainMs = millis();
+        gapsThisWindow = 0;
 
         // Mark the start of the next 60-second collection window
         lastPublishTime = millis();

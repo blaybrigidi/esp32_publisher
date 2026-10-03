@@ -164,9 +164,9 @@ Once your finger is on the sensor:
 
 ```
 [IR] 87432
-[BEAT] delta=812ms raw=73.9
+[BEAT] delta=812.4ms raw=73.9
 [IR] 91204
-IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | SDNN=18.3 | RMSSD=12.1 | NN=71/73
+IR=91204  | BPM=73.9  | Avg BPM=74  | Temp=33.21°C | sample=10.012ms | gaps=0 | SDNN=18.3 | RMSSD=12.1 | NN=71/73
 [MQTT] Publish OK
 Entering light sleep for 300 seconds...
 Woke from light sleep.
