@@ -2,7 +2,7 @@
 
 DialOG is a small wearable device that continuously measures a patient's heart rate and finger temperature, then sends those readings to a cloud dashboard over WiFi. It is designed with diabetic patients in mind, where early detection of changes in heart rhythm and peripheral temperature can indicate complications before they become serious.
 
-The device is built around an ESP32 microcontroller paired with the MAX30102 optical heart-rate sensor. It collects data for 15 seconds, uploads a summary, sleeps for 5 minutes to save battery, then repeats — all without losing its WiFi connection.
+The device is built around an ESP32 microcontroller paired with the MAX30102 optical heart-rate sensor. It collects data for 60 seconds, uploads a summary, sleeps for 5 minutes to save battery, then repeats — all without losing its WiFi connection.
 
 ---
 
@@ -186,7 +186,7 @@ Each reading sent to the cloud contains the following fields:
 | `temp` | Finger surface temperature in °C |
 | `hrv_sdnn` | Heart-rate variability — SDNN.  Measures how spread out the beat-to-beat timing is.  Higher is generally healthier. |
 | `hrv_rmssd` | Heart-rate variability — RMSSD.  Measures rapid, short-term changes between consecutive beats.  Also higher = healthier. |
-| `beat_count` | Number of valid heartbeats captured in the 15-second window |
+| `beat_count` | Number of valid heartbeats captured in the 60-second window |
 | `patientId` | Identifies which patient the reading belongs to |
 | `deviceId` | Identifies which device sent it |
 | `esp_millis` | How many milliseconds the device has been running — useful for spotting gaps |
@@ -201,7 +201,7 @@ These two values at the top of `src/main.cpp` are the most likely things you wil
 
 ```cpp
 // How long (in milliseconds) the device collects data before uploading
-const unsigned long PUBLISH_INTERVAL_MS = 15000;  // 15 seconds
+const unsigned long PUBLISH_INTERVAL_MS = 60000;  // 60 seconds
 
 // How long the device sleeps between uploads (in microseconds)
 #define SLEEP_DURATION_US (300ULL * 1000000ULL)   // 5 minutes
@@ -209,7 +209,7 @@ const unsigned long PUBLISH_INTERVAL_MS = 15000;  // 15 seconds
 // #define SLEEP_DURATION_US (10ULL * 1000000ULL)
 ```
 
-A shorter collection window means more frequent uploads but less data per reading.  A longer sleep saves more battery.
+A shorter collection window means more frequent uploads but less data per reading, and HRV gets much less reliable below about 60 seconds.  A longer sleep saves more battery.  With the defaults the device is awake about 64 s out of every ~364 s (about 17–18% duty cycle).
 
 ---
 

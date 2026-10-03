@@ -1,9 +1,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // DialOG — Wearable Vitals Monitor
 //
-// This device reads a patient's heart rate and finger temperature, then sends
-// the results over WiFi to a cloud server every 15 seconds.  Between readings
-// it goes into a light sleep to save battery while keeping WiFi alive.
+// This device reads a patient's heart rate and finger temperature for 60
+// seconds, sends a summary over WiFi to a cloud server, then goes into a
+// 5-minute light sleep to save battery while keeping WiFi alive.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <Wire.h>
@@ -24,9 +24,12 @@
 // ── Timing ────────────────────────────────────────────────────────────────────
 
 // How long (in milliseconds) the device collects readings before sending them.
-// 15 seconds gives the beat-detection algorithm enough time to settle after
-// waking from sleep.
-const unsigned long PUBLISH_INTERVAL_MS = 15000;
+// 60 seconds gives roughly 50-90 beats at rest, which is what RMSSD needs to
+// agree closely with a standard 5-minute recording (a 15 s window gave only
+// 12-18 beats and readings that varied by ~50% from one cycle to the next).
+// Duty cycle: ~60 s collecting + ~4 s waking/reconnecting out of every ~364 s,
+// i.e. the device is awake about 17-18% of the time.
+const unsigned long PUBLISH_INTERVAL_MS = 60000;
 unsigned long lastPublishTime = 0;
 
 // How long the device sleeps between uploads (in microseconds): 5 minutes.
@@ -285,7 +288,7 @@ void setup()
 //   1. Reads the infrared light level from the sensor.
 //   2. If a fingertip is detected, checks whether a heartbeat just occurred.
 //   3. Keeps the MQTT connection alive (reconnects if needed).
-//   4. Every 15 seconds, sends all collected readings and then sleeps briefly.
+//   4. Every 60 seconds, sends all collected readings and then sleeps for 5 minutes.
 // ─────────────────────────────────────────────────────────────────────────────
 void loop()
 {
@@ -465,7 +468,7 @@ void loop()
         // instead of processing a backlog of stale samples.
         particleSensor.clearFIFO();
 
-        // Mark the start of the next 15-second collection window
+        // Mark the start of the next 60-second collection window
         lastPublishTime = millis();
     }
 }

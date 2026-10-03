@@ -34,7 +34,7 @@ Connect to MQTT broker
     │
     ▼
 ┌─────────────────────────────────────┐
-│  COLLECT  (default: 15 seconds)     │
+│  COLLECT  (default: 60 seconds)     │
 │  • Read IR light from sensor        │
 │  • Detect each heartbeat            │
 │  • Record beat timing for HRV       │
@@ -243,6 +243,10 @@ Light sleep was chosen because:
 1. Reconnecting WiFi from scratch after deep sleep adds 3–5 seconds per cycle, reducing the effective upload rate significantly.
 2. RAM is preserved, so beat history and all variables survive the sleep without needing to be rebuilt.
 
+### Duty cycle
+
+Each cycle is about 60 s collecting, about 4 s waking and reconnecting (WiFi, DNS and the TLS handshake to the broker), then 300 s asleep.  The device is therefore awake roughly 64 s out of every ~364 s, a duty cycle of about 17–18%.  With the earlier 15 s window it was about 6%, so battery estimates based on the shorter wake time no longer apply.
+
 ### What happens to millis() during sleep?
 
 `millis()` keeps ticking during light sleep.  This means the timestamp of the last heartbeat (`lastBeat`) becomes stale after sleeping — the gap from the last pre-sleep beat to the first post-wake beat would include the entire sleep duration, producing an impossibly low BPM.
@@ -318,7 +322,7 @@ All tuneable values are near the top of `src/main.cpp`:
 
 | Setting | Default | Description |
 |---|---|---|
-| `PUBLISH_INTERVAL_MS` | `15000` | Collection window length in milliseconds |
+| `PUBLISH_INTERVAL_MS` | `60000` | Collection window length in milliseconds |
 | `SLEEP_DURATION_US` | `300 000 000` | Sleep duration in microseconds (5 minutes) |
 | `RATE_SIZE` | `8` | Number of beats kept in the rolling buffer |
 | `THERMISTOR_PIN` | `32` | GPIO pin for the temperature sensor |
@@ -341,8 +345,8 @@ Settings defined in `src/secrets.h`:
 
 ## Known Limitations
 
-**Short recording window**
-15 seconds provides only 12–18 beats for HRV analysis.  Clinical standards (like the Task Force 1996 guidelines) recommend at least 5 minutes of data for short-term HRV.  The current values are useful for trend monitoring but should not be compared against clinical reference ranges directly.
+**Ultra-short recording window**
+60 seconds provides roughly 50–90 beats.  Clinical standards (Task Force 1996) define short-term HRV over 5 minutes.  RMSSD from 60 s agrees closely with the 5-minute value (Munoz et al. 2015), but SDNN grows with recording length, so the 60 s SDNN reads lower than a 5-minute SDNN and should not be compared against 5-minute reference ranges.
 
 **Single-patient per device**
 Each device is configured for one patient.  To monitor multiple patients, flash separate devices with different `PATIENT_ID` values.
